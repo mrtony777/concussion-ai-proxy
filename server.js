@@ -5,7 +5,7 @@ const app = express();
 app.use(express.json({ limit: "200kb" }));
 
 // --------------------------------------------------
-// CORS SETUP (Uses ALLOWED_ORIGINS env variable)
+// CORS SETUP
 // --------------------------------------------------
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
@@ -30,32 +30,7 @@ app.get("/", (req, res) => {
 });
 
 // --------------------------------------------------
-// TEMP TEST ROUTE (Simple browser test)
-// --------------------------------------------------
-app.get("/test", async (req, res) => {
-  try {
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: process.env.MODEL,
-        input: "Explain why stopping play after concussion symptoms is important in 2 short sentences."
-      })
-    });
-
-    const data = await response.json();
-    res.json(data);
-
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// --------------------------------------------------
-// REAL AI EVALUATION ROUTE
+// AI EVALUATION ROUTE
 // --------------------------------------------------
 app.post("/evaluate", async (req, res) => {
   try {
@@ -65,14 +40,18 @@ app.post("/evaluate", async (req, res) => {
       return res.status(400).json({ error: "Missing learnerResponse" });
     }
 
+    if (learnerResponse.length > 800) {
+      return res.status(400).json({ error: "Response too long" });
+    }
+
     const rubric = `
 You are evaluating a student athlete’s response to a concussion scenario.
 
-Best decision:
+Correct decision:
 Stop playing immediately, report symptoms to a coach or athletic trainer,
 and seek medical evaluation. Continuing play risks serious harm.
 
-Score 0-4:
+Score 0–4:
 
 4 = Clearly stop play + report + medical evaluation + strong safety reasoning
 3 = Stop/report but explanation is limited
@@ -80,11 +59,11 @@ Score 0-4:
 1 = Minimizes symptoms or suggests waiting
 0 = Encourages continuing play
 
-Return STRICT JSON only:
+Return STRICT JSON only in this format:
 
 {
   "score": number (0-4),
-  "narrative": "3-5 short supportive sentences max"
+  "narrative": "3–5 short supportive sentences maximum"
 }
 `;
 
@@ -125,7 +104,31 @@ Return STRICT JSON only:
     }
 
     const data = await response.json();
-    const parsed = JSON.parse(data.output_text);
+
+    // Parse structured output safely
+    let parsed;
+    try {
+      parsed = JSON.parse(data.output_text);
+    } catch {
+      return res.status(500).json({
+        error: "Model returned invalid JSON",
+        raw: data.output_text
+      });
+    }
+
+    // Extra server-side safety checks
+    if (
+      typeof parsed.score !== "number" ||
+      parsed.score < 0 ||
+      parsed.score > 4
+    ) {
+      parsed.score = 0;
+    }
+
+    if (typeof parsed.narrative !== "string") {
+      parsed.narrative =
+        "Thanks for your response. In this situation, the safest action is to stop playing and report symptoms immediately.";
+    }
 
     res.json(parsed);
 
