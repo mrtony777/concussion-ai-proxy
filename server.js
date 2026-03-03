@@ -3,135 +3,172 @@ import cors from "cors";
 import OpenAI from "openai";
 
 const app = express();
-const port = process.env.PORT || 10000;
+app.use(express.json({ limit: "1mb" }));
 
-// -----------------------------
-// Environment Variables
-// -----------------------------
-const openai = new OpenAI({
-  apiKey: process.env.ConcussionAIKey
-});
+/**
+ * ENV VARS REQUIRED
+ * - OPENAI_API_KEY
+ * - ALLOWED_ORIGINS  (comma-separated)
+ * - OPENAI_MODEL     (optional)
+ */
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
-const MODEL = process.env.MODEL || "gpt-4.1-mini";
-
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(",")
-  : [];
-
-// -----------------------------
-// Middleware
-// -----------------------------
-app.use(express.json());
-
+// CORS: allow only listed origins (plus allow no-origin requests like curl)
 app.use(
   cors({
     origin: function (origin, callback) {
-      if (!origin) return callback(null, true);
-
-      if (allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("Not allowed by CORS"));
-      }
-    }
+      if (!origin) return callback(null, true); // Postman/curl/no-origin allowed
+      if (ALLOWED_ORIGINS.length === 0) return callback(null, true); // If not set, allow all (dev)
+      if (ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+      return callback(new Error("CORS blocked for origin: " + origin));
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type"],
   })
 );
 
-// -----------------------------
-// Health Check Route
-// -----------------------------
+// Helpful for preflight
+app.options("*", cors());
+
+// Create OpenAI client (will error on startup if key missing)
+if (!OPENAI_API_KEY) {
+  console.warn(
+    "WARNING: OPENAI_API_KEY is missing. /evaluate will fail until you set it in Render env vars."
+  );
+}
+const client = new OpenAI({ apiKey: OPENAI_API_KEY });
+
+// Health check
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "concussion-ai-proxy" });
 });
 
-// -----------------------------
-// MAIN Evaluation Route (POST)
-// -----------------------------
+/**
+ * POST /evaluate
+ * Body: { response: "learner text here" }
+ * Returns strict JSON: { score, narrative, strengths[], improvements[] }
+ */
 app.post("/evaluate", async (req, res) => {
   try {
-    const { response } = req.body;
+    const learnerResponse = (req.body?.response || "").toString().trim();
 
-    if (!response) {
-      return res.status(400).json({ error: "Missing response text." });
+    if (!learnerResponse) {
+      return res.status(400).json({
+        error: "Missing required field: response",
+      });
     }
 
-    const aiResponse = await openai.responses.create({
-      model: MODEL,
-      input: `
-You are grading a short-answer reflection.
+    if (!OPENAI_API_KEY) {
+      return res.status(500).json({
+        error:
+          "Server missing OPENAI_API_KEY. Add it in Render → Environment, then redeploy.",
+      });
+    }
 
-Use this rubric:
+    // --- Your rubric + strict output rules ---
+    const rubric = `
+You are an evaluator for a concussion decision scenario.
+Score from 0 to 4 using this rubric:
 
-5 = Thorough, accurate, safety-focused, clearly reasoned.
-4 = Mostly accurate, good reasoning, minor gaps.
-3 = Basic understanding but lacks depth.
-2 = Limited understanding or unclear reasoning.
-1 = Incorrect or unsafe response.
+4 = clearly removes self/athlete from play immediately, reports symptoms to medical staff/coach, mentions safety risk (second impact / worsening), and states follow-up evaluation.
+3 = recommends removal + reporting, but misses one key rationale or follow-up detail.
+2 = mixed/unclear; mentions symptoms but hesitates or delays reporting/removal.
+1 = minimizes symptoms or suggests continuing play with weak rationale.
+0 = explicitly recommends continuing play or hiding symptoms.
 
-Provide constructive feedback in 3–5 sentences maximum.
+Output MUST be valid JSON only.
+Narrative MUST be 3–5 short sentences max (keep it tight).
+Do NOT include markdown, code fences, or extra keys.
+`;
 
-Return ONLY valid JSON in this exact format:
-{"score": number, "feedback": "string"}
-
-Student Response:
-${response}
-`
+    // Use Structured Outputs (strict JSON schema)
+    const response = await client.responses.create({
+      model: OPENAI_MODEL,
+      input: [
+        { role: "system", content: rubric },
+        {
+          role: "user",
+          content: `Learner response:\n${learnerResponse}`,
+        },
+      ],
+      response_format: {
+        type: "json_schema",
+        json_schema: {
+          name: "concussion_eval",
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              score: { type: "integer", minimum: 0, maximum: 4 },
+              narrative: { type: "string" },
+              strengths: {
+                type: "array",
+                items: { type: "string" },
+                maxItems: 3,
+              },
+              improvements: {
+                type: "array",
+                items: { type: "string" },
+                maxItems: 3,
+              },
+            },
+            required: ["score", "narrative", "strengths", "improvements"],
+          },
+          strict: true,
+        },
+      },
+      max_output_tokens: 250,
     });
 
-    const textOutput = aiResponse.output[0].content[0].text;
+    // Extract the JSON text
+    const text = response.output_text;
 
+    // Parse and return JSON
     let parsed;
-
     try {
-      parsed = JSON.parse(textOutput);
-    } catch (parseError) {
-      console.error("JSON parse error:", textOutput);
-      return res.status(500).json({ error: "Invalid AI JSON format." });
+      parsed = JSON.parse(text);
+    } catch (e) {
+      // If something weird happens, return raw for debugging
+      return res.status(502).json({
+        error: "Model did not return valid JSON.",
+        raw: text,
+      });
     }
 
-    res.json(parsed);
-
-  } catch (error) {
-    console.error("Evaluation error:", error);
-    res.status(500).json({ error: "Evaluation failed." });
+    return res.json(parsed);
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({
+      error: "Server error",
+      details: err?.message || String(err),
+    });
   }
 });
 
-// -----------------------------
-// SIMPLE BROWSER TEST ROUTE (GET)
-// -----------------------------
+/**
+ * GET /test-evaluate
+ * Simple browser test (no console needed).
+ * It calls /evaluate with a sample response and shows the JSON result.
+ */
 app.get("/test-evaluate", async (req, res) => {
   try {
-    const sampleResponse =
-      "I would remove the player from the game and monitor symptoms before allowing a return.";
-
-    const aiResponse = await openai.responses.create({
-      model: MODEL,
-      input: `
-Score this response from 1–5 using the concussion safety rubric.
-Provide 3–5 sentences of feedback.
-Return ONLY valid JSON:
-{"score": number, "feedback": "string"}
-
-Response:
-${sampleResponse}
-`
+    const sample = "I would stop playing immediately and tell the athletic trainer.";
+    const r = await fetch(`${req.protocol}://${req.get("host")}/evaluate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ response: sample }),
     });
-
-    const textOutput = aiResponse.output[0].content[0].text;
-    const parsed = JSON.parse(textOutput);
-
-    res.json(parsed);
-
-  } catch (error) {
-    console.error("Test route error:", error);
-    res.status(500).json({ error: "Test failed." });
+    const data = await r.json();
+    res.json({ test_ok: r.ok, result: data });
+  } catch (e) {
+    res.status(500).json({ test_ok: false, error: e?.message || String(e) });
   }
 });
 
-// -----------------------------
-// Start Server
-// -----------------------------
-app.listen(port, () => {
-  console.log(`Server running on ${port}`);
-});
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log("Server running on", PORT));
