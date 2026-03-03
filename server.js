@@ -26,7 +26,7 @@ app.use(express.json());
 app.use(
   cors({
     origin: function (origin, callback) {
-      if (!origin) return callback(null, true); // allow server-to-server or curl
+      if (!origin) return callback(null, true);
 
       if (allowedOrigins.includes(origin)) {
         callback(null, true);
@@ -45,7 +45,7 @@ app.get("/", (req, res) => {
 });
 
 // -----------------------------
-// Evaluation Route
+// MAIN Evaluation Route (POST)
 // -----------------------------
 app.post("/evaluate", async (req, res) => {
   try {
@@ -60,7 +60,7 @@ app.post("/evaluate", async (req, res) => {
       input: `
 You are grading a short-answer reflection.
 
-Use the rubric below:
+Use this rubric:
 
 5 = Thorough, accurate, safety-focused, clearly reasoned.
 4 = Mostly accurate, good reasoning, minor gaps.
@@ -90,9 +90,42 @@ ${response}
     }
 
     res.json(parsed);
+
   } catch (error) {
     console.error("Evaluation error:", error);
     res.status(500).json({ error: "Evaluation failed." });
+  }
+});
+
+// -----------------------------
+// SIMPLE BROWSER TEST ROUTE (GET)
+// -----------------------------
+app.get("/test-evaluate", async (req, res) => {
+  try {
+    const sampleResponse =
+      "I would remove the player from the game and monitor symptoms before allowing a return.";
+
+    const aiResponse = await openai.responses.create({
+      model: MODEL,
+      input: `
+Score this response from 1–5 using the concussion safety rubric.
+Provide 3–5 sentences of feedback.
+Return ONLY valid JSON:
+{"score": number, "feedback": "string"}
+
+Response:
+${sampleResponse}
+`
+    });
+
+    const textOutput = aiResponse.output[0].content[0].text;
+    const parsed = JSON.parse(textOutput);
+
+    res.json(parsed);
+
+  } catch (error) {
+    console.error("Test route error:", error);
+    res.status(500).json({ error: "Test failed." });
   }
 });
 
@@ -101,72 +134,4 @@ ${response}
 // -----------------------------
 app.listen(port, () => {
   console.log(`Server running on ${port}`);
-});      body: JSON.stringify({
-        model: process.env.MODEL,
-        input: [
-          { role: "system", content: rubric },
-          { role: "user", content: learnerResponse }
-        ],
-        max_output_tokens: 200,
-        response_format: {
-          type: "json_schema",
-          json_schema: {
-            name: "concussion_feedback",
-            schema: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                score: { type: "integer", minimum: 0, maximum: 4 },
-                narrative: { type: "string" }
-              },
-              required: ["score", "narrative"]
-            }
-          }
-        }
-      })
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      return res.status(500).json({ error: "OpenAI error", detail: text });
-    }
-
-    const data = await response.json();
-
-    // Parse structured output safely
-    let parsed;
-    try {
-      parsed = JSON.parse(data.output_text);
-    } catch {
-      return res.status(500).json({
-        error: "Model returned invalid JSON",
-        raw: data.output_text
-      });
-    }
-
-    // Extra server-side safety checks
-    if (
-      typeof parsed.score !== "number" ||
-      parsed.score < 0 ||
-      parsed.score > 4
-    ) {
-      parsed.score = 0;
-    }
-
-    if (typeof parsed.narrative !== "string") {
-      parsed.narrative =
-        "Thanks for your response. In this situation, the safest action is to stop playing and report symptoms immediately.";
-    }
-
-    res.json(parsed);
-
-  } catch (error) {
-    res.status(500).json({
-      error: "Server error",
-      detail: error.message
-    });
-  }
 });
-
-const port = process.env.PORT || 10000;
-app.listen(port, () => console.log("Server running on", port));
