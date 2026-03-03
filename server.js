@@ -4,9 +4,9 @@ import cors from "cors";
 const app = express();
 app.use(express.json({ limit: "200kb" }));
 
-// --------------------
-// CORS SETUP
-// --------------------
+// --------------------------------------------------
+// CORS SETUP (Uses ALLOWED_ORIGINS env variable)
+// --------------------------------------------------
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map(o => o.trim())
@@ -22,16 +22,41 @@ app.use(cors({
   }
 }));
 
-// --------------------
+// --------------------------------------------------
 // HEALTH CHECK
-// --------------------
+// --------------------------------------------------
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "concussion-ai-proxy" });
 });
 
-// --------------------
-// AI EVALUATION ROUTE
-// --------------------
+// --------------------------------------------------
+// TEMP TEST ROUTE (Simple browser test)
+// --------------------------------------------------
+app.get("/test", async (req, res) => {
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: process.env.MODEL,
+        input: "Explain why stopping play after concussion symptoms is important in 2 short sentences."
+      })
+    });
+
+    const data = await response.json();
+    res.json(data);
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --------------------------------------------------
+// REAL AI EVALUATION ROUTE
+// --------------------------------------------------
 app.post("/evaluate", async (req, res) => {
   try {
     const { learnerResponse } = req.body;
@@ -102,10 +127,10 @@ Return STRICT JSON only:
     const data = await response.json();
     const parsed = JSON.parse(data.output_text);
 
-    return res.json(parsed);
+    res.json(parsed);
 
   } catch (error) {
-    return res.status(500).json({
+    res.status(500).json({
       error: "Server error",
       detail: error.message
     });
