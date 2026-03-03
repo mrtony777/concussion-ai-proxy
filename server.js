@@ -1,79 +1,107 @@
 import express from "express";
 import cors from "cors";
+import OpenAI from "openai";
 
 const app = express();
-app.use(express.json({ limit: "200kb" }));
+const port = process.env.PORT || 10000;
 
-// --------------------------------------------------
-// CORS SETUP
-// --------------------------------------------------
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map(o => o.trim())
-  .filter(Boolean);
+// -----------------------------
+// Environment Variables
+// -----------------------------
+const openai = new OpenAI({
+  apiKey: process.env.ConcussionAIKey
+});
 
-app.use(cors({
-  origin: function (origin, callback) {
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
+const MODEL = process.env.MODEL || "gpt-4.1-mini";
+
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",")
+  : [];
+
+// -----------------------------
+// Middleware
+// -----------------------------
+app.use(express.json());
+
+app.use(
+  cors({
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true); // allow server-to-server or curl
+
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
     }
-    return callback(new Error("CORS blocked: " + origin));
-  }
-}));
+  })
+);
 
-// --------------------------------------------------
-// HEALTH CHECK
-// --------------------------------------------------
+// -----------------------------
+// Health Check Route
+// -----------------------------
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "concussion-ai-proxy" });
 });
 
-// --------------------------------------------------
-// AI EVALUATION ROUTE
-// --------------------------------------------------
+// -----------------------------
+// Evaluation Route
+// -----------------------------
 app.post("/evaluate", async (req, res) => {
   try {
-    const { learnerResponse } = req.body;
+    const { response } = req.body;
 
-    if (!learnerResponse || typeof learnerResponse !== "string") {
-      return res.status(400).json({ error: "Missing learnerResponse" });
+    if (!response) {
+      return res.status(400).json({ error: "Missing response text." });
     }
 
-    if (learnerResponse.length > 800) {
-      return res.status(400).json({ error: "Response too long" });
+    const aiResponse = await openai.responses.create({
+      model: MODEL,
+      input: `
+You are grading a short-answer reflection.
+
+Use the rubric below:
+
+5 = Thorough, accurate, safety-focused, clearly reasoned.
+4 = Mostly accurate, good reasoning, minor gaps.
+3 = Basic understanding but lacks depth.
+2 = Limited understanding or unclear reasoning.
+1 = Incorrect or unsafe response.
+
+Provide constructive feedback in 3–5 sentences maximum.
+
+Return ONLY valid JSON in this exact format:
+{"score": number, "feedback": "string"}
+
+Student Response:
+${response}
+`
+    });
+
+    const textOutput = aiResponse.output[0].content[0].text;
+
+    let parsed;
+
+    try {
+      parsed = JSON.parse(textOutput);
+    } catch (parseError) {
+      console.error("JSON parse error:", textOutput);
+      return res.status(500).json({ error: "Invalid AI JSON format." });
     }
 
-    const rubric = `
-You are evaluating a student athlete’s response to a concussion scenario.
+    res.json(parsed);
+  } catch (error) {
+    console.error("Evaluation error:", error);
+    res.status(500).json({ error: "Evaluation failed." });
+  }
+});
 
-Correct decision:
-Stop playing immediately, report symptoms to a coach or athletic trainer,
-and seek medical evaluation. Continuing play risks serious harm.
-
-Score 0–4:
-
-4 = Clearly stop play + report + medical evaluation + strong safety reasoning
-3 = Stop/report but explanation is limited
-2 = Mixed or uncertain response
-1 = Minimizes symptoms or suggests waiting
-0 = Encourages continuing play
-
-Return STRICT JSON only in this format:
-
-{
-  "score": number (0-4),
-  "narrative": "3–5 short supportive sentences maximum"
-}
-`;
-
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
+// -----------------------------
+// Start Server
+// -----------------------------
+app.listen(port, () => {
+  console.log(`Server running on ${port}`);
+});      body: JSON.stringify({
         model: process.env.MODEL,
         input: [
           { role: "system", content: rubric },
